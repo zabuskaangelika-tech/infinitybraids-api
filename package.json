@@ -1,10 +1,14 @@
 {
   "name": "infinitybraids-api",
   "version": "1.0.0",
+  "description": "InfinityBraids AI API",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "cors": "^2.8.5",
