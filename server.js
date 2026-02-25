@@ -1,10 +1,22 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 
 // ====== KONFIG ======
 const PORT = process.env.PORT || 3000;
 const TOP_N = Number(process.env.TOP_N || 5);
+
+// CORS: lista domen rozdzielona przecinkami, np.
+// CORS_ORIGINS=https://silver-lolly-a46eeb.netlify.app,http://localhost:5173
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const NODE_ENV = process.env.NODE_ENV || "development";
+const DEBUG_ERRORS = String(process.env.DEBUG_ERRORS || "").toLowerCase() === "true";
 
 // ====== FETCH (Node 18+ ma global fetch; dla starszych fallback) ======
 let fetchFn = global.fetch;
@@ -277,57 +289,66 @@ function buildHumanMessage({ lang, tone, hair_hex, recommendations }) {
 async function analyzeHairWithAI(image_data_url) {
   const fetch = await getFetch();
 
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You analyze HAIR COLOR from an image. Return ONLY JSON: " +
-            "{\"tone\":\"black|dark_brown|medium_brown|light_brown|blonde|auburn|red|grey\"," +
-            "\"hair_hex\":\"#RRGGBB\"}. " +
-            "hair_hex must be the dominant hair color (not background, not skin).",
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Analyze the hair in the image and return ONLY the JSON." },
-            { type: "image_url", image_url: { url: image_data_url } },
-          ],
-        },
-      ],
-      max_tokens: 120,
-    }),
-  });
+  // timeout (żeby nie wisiało)
+  const controller = new AbortController();
+  const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 20000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const data = await resp.json().catch(() => null);
-
-  if (!resp.ok) {
-    const err = new Error("OpenAI error");
-    err.status = resp.status;
-    err.details = data;
-    throw err;
-  }
-
-  const text = data?.choices?.[0]?.message?.content || "{}";
   try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You analyze HAIR COLOR from an image. Return ONLY JSON: " +
+              "{\"tone\":\"black|dark_brown|medium_brown|light_brown|blonde|auburn|red|grey\"," +
+              "\"hair_hex\":\"#RRGGBB\"}. " +
+              "hair_hex must be the dominant hair color (not background, not skin).",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Analyze the hair in the image and return ONLY the JSON." },
+              { type: "image_url", image_url: { url: image_data_url } },
+            ],
+          },
+        ],
+        max_tokens: 120,
+      }),
+    });
+
+    const data = await resp.json().catch(() => null);
+
+    if (!resp.ok) {
+      const err = new Error("OpenAI error");
+      err.status = resp.status;
+      err.details = data;
+      throw err;
+    }
+
+    const text = data?.choices?.[0]?.message?.content || "{}";
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { raw: text };
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 // ====== DOPASOWANIE DO KATALOGU ======
 function deltaEToPercent(deltaE) {
-  // Prosty mapping do UI (możesz zmieniać)
-  // deltaE ~ 0 => 99-100%, deltaE ~ 20 => ~80%, deltaE ~ 40 => ~60%
+  // Prosty mapping do UI
   const percent = Math.round(100 - (deltaE * 1.0)); // 1 punkt ΔE = ~1%
   return Math.max(35, Math.min(99, percent));
 }
@@ -360,11 +381,76 @@ function matchCatalogByHairHex(hairHex) {
   return items;
 }
 
+// ====== BODY NORMALIZACJA (gdy przyjdzie jako string) ======
+function normalizeBody(req) {
+  // Express może dać body jako string w rzadkich przypadkach
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return { raw_body: req.body };
+    }
+  }
+  return req.body || {};
+}
+
 // ====== WYCIĄGANIE OBRAZU Z RÓŻNYCH FORMATÓW REQUESTU (UI/n8n) ======
+function looksLikeBase64(s) {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  if (t.length < 100) return false; // za krótkie
+  if (t.startsWith("data:image/")) return true;
+  // "goły" base64 (bez prefixu)
+  return /^[A-Za-z0-9+/=\s]+$/.test(t.slice(0, 200));
+}
+
+function deepFindImageString(value, depth = 0, maxDepth = 6) {
+  if (depth > maxDepth) return null;
+
+  if (typeof value === "string") {
+    return looksLikeBase64(value) ? value.trim() : null;
+  }
+
+  if (!value || typeof value !== "object") return null;
+
+  // arrays
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = deepFindImageString(item, depth + 1, maxDepth);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // objects
+  for (const k of Object.keys(value)) {
+    const found = deepFindImageString(value[k], depth + 1, maxDepth);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function toDataUrl(val) {
+  if (typeof val !== "string") return null;
+  const v = val.trim();
+
+  // jeśli to już DataURL
+  if (v.startsWith("data:image/")) return v;
+
+  // jeśli to goły base64 bez prefixu -> zgadujemy jpeg
+  if (/^[A-Za-z0-9+/=\s]+$/.test(v.slice(0, 200))) {
+    return `data:image/jpeg;base64,${v.replace(/\s/g, "")}`;
+  }
+
+  return null;
+}
+
 function extractImageDataUrl(body) {
-  // Najczęstsze klucze:
+  // Najczęstsze klucze (szybka ścieżka):
   const candidates = [
     body?.image_base64,
+    body?.imageBase64,
     body?.image,
     body?.photo,
     body?.file,
@@ -373,53 +459,104 @@ function extractImageDataUrl(body) {
     body?.imageDataUrl,
     body?.image_data_url,
     body?.payload?.image_base64,
+    body?.payload?.imageBase64,
     body?.payload?.image,
+    body?.payload?.photo,
+    body?.payload?.file,
     body?.data?.image_base64,
+    body?.data?.imageBase64,
     body?.data?.image,
+    body?.data?.photo,
+    body?.data?.file,
   ];
 
-  const val = candidates.find((x) => typeof x === "string" && x.length > 20);
+  const direct = candidates.find((x) => typeof x === "string" && x.length > 20);
+  if (direct) return toDataUrl(direct);
 
-  if (!val) return null;
-
-  // jeśli to już DataURL: data:image/...;base64,...
-  if (val.startsWith("data:image/")) return val;
-
-  // jeśli to goły base64 bez prefixu:
-  // spróbujemy zgadnąć jpeg
-  if (/^[A-Za-z0-9+/=]+$/.test(val.slice(0, 80))) {
-    return `data:image/jpeg;base64,${val}`;
-  }
+  // Wolniejsza ścieżka: znajdź "gdziekolwiek" w obiekcie
+  const deep = deepFindImageString(body);
+  if (deep) return toDataUrl(deep);
 
   return null;
 }
 
 // ====== SERWER ======
 const app = express();
-app.use(cors());
+
+// security headers
+app.use(helmet());
+
+// CORS
+app.use(cors({
+  origin: (origin, cb) => {
+    // allow no-origin (curl, health checks)
+    if (!origin) return cb(null, true);
+
+    // jeśli nie ustawiono allowlisty: w dev pozwól, w prod blokuj
+    if (!CORS_ORIGINS.length) {
+      const ok = NODE_ENV !== "production";
+      return cb(ok ? null : new Error("CORS blocked"), ok);
+    }
+
+    const ok = CORS_ORIGINS.includes(origin);
+    return cb(ok ? null : new Error("CORS blocked"), ok);
+  }
+}));
+
+// parsers
 app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+
+// rate limit (global)
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.RATE_LIMIT_PER_MIN || 180),
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
+
+// stricter rate limit for analyze/webhook
+const heavyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.ANALYZE_LIMIT_PER_MIN || 30),
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.get("/", (req, res) => {
   res.status(200).send("OK - infinitybraids-api is running");
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    hasKey: !!process.env.OPENAI_API_KEY,
-    catalogLoaded: CATALOG.length,
-    topN: TOP_N,
-  });
+  // Bezpieczniej: nie zdradzaj hasKey na prod
+  const base = { status: "ok" };
+  if (NODE_ENV !== "production") {
+    base.hasKey = !!process.env.OPENAI_API_KEY;
+    base.catalogLoaded = CATALOG.length;
+    base.topN = TOP_N;
+  }
+  res.json(base);
 });
 
-// Twoje testy (test.html)
-app.post("/analyze", async (req, res) => {
+// ========== POST /analyze ==========
+app.post("/analyze", heavyLimiter, async (req, res) => {
   try {
-    const image = extractImageDataUrl(req.body || {});
-    const client_text = req.body?.client_text || req.body?.text || "";
-    if (!image) return res.status(400).json({ error: "Brak obrazu w body (image_base64/image/photo/...)" });
+    const body = normalizeBody(req);
+    const image = extractImageDataUrl(body);
+    const client_text = body?.client_text || body?.text || body?.message || "";
 
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "Brak OPENAI_API_KEY" });
-    if (!CATALOG.length) return res.status(500).json({ error: "Brak katalogu (catalog.json obok server.js)" });
+    if (!image) {
+      return res.status(400).json({
+        ok: false,
+        error: "Brak obrazu w body (image_base64/image/photo/... albo data:image/...;base64,...)",
+        received_keys: Object.keys(body || {}),
+        content_type: req.headers["content-type"] || null,
+        body_type: typeof req.body,
+      });
+    }
+
+    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ ok: false, error: "Brak OPENAI_API_KEY" });
+    if (!CATALOG.length) return res.status(500).json({ ok: false, error: "Brak katalogu (catalog.json obok server.js)" });
 
     const lang = detectLangFromText(client_text);
 
@@ -435,14 +572,14 @@ app.post("/analyze", async (req, res) => {
         hair_hex: null,
         message: buildHumanMessage({ lang, tone, hair_hex: "(unknown)", recommendations: [] }),
         recommendations: [],
-        ai_raw: ai,
+        ai_raw: DEBUG_ERRORS ? ai : undefined,
       });
     }
 
     const recommendations = matchCatalogByHairHex(hair_hex);
     const message = buildHumanMessage({ lang, tone, hair_hex, recommendations });
 
-    res.json({
+    return res.json({
       ok: true,
       lang,
       tone,
@@ -451,21 +588,30 @@ app.post("/analyze", async (req, res) => {
       recommendations,
     });
   } catch (e) {
-    res.status(500).json({ error: "Server error", details: String(e?.message || e), openai_details: e?.details });
+    console.error("ANALYZE ERROR:", e);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+      details: DEBUG_ERRORS ? String(e?.message || e) : undefined,
+      openai_details: DEBUG_ERRORS ? e?.details : undefined,
+    });
   }
 });
 
-// ✅ Ten endpoint jest pod Twoją stronę Netlify (UI “n8n webhook url”)
-app.post("/webhook", async (req, res) => {
+// ========== POST /webhook (pod Twoją stronę Netlify / UI) ==========
+app.post("/webhook", heavyLimiter, async (req, res) => {
   try {
-    const image = extractImageDataUrl(req.body || {});
-    const client_text = req.body?.client_text || req.body?.text || req.body?.message || "";
+    const body = normalizeBody(req);
+    const image = extractImageDataUrl(body);
+    const client_text = body?.client_text || body?.text || body?.message || "";
 
     if (!image) {
       return res.status(400).json({
         ok: false,
         error: "No image found in request. Expected image_base64/image/photo/file/dataUrl…",
-        received_keys: Object.keys(req.body || {}),
+        received_keys: Object.keys(body || {}),
+        content_type: req.headers["content-type"] || null,
+        body_type: typeof req.body,
       });
     }
 
@@ -486,7 +632,6 @@ app.post("/webhook", async (req, res) => {
       recommendations,
     });
 
-    // Format “pod UI”: message + top_matches (karty) + lista
     const top_matches = recommendations.slice(0, 3).map((r, i) => ({
       rank: i + 1,
       title: r.name,
@@ -500,18 +645,18 @@ app.post("/webhook", async (req, res) => {
       lang,
       tone,
       hair_hex: hair_hex || null,
-
-      // to UI zwykle wyświetla jako główny tekst:
       message,
-
-      // karty “TOP MATCHES”
       top_matches,
-
-      // pełna lista (jeśli UI ją pokazuje)
       recommendations,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: "Server error", details: String(e?.message || e), openai_details: e?.details });
+    console.error("WEBHOOK ERROR:", e);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+      details: DEBUG_ERRORS ? String(e?.message || e) : undefined,
+      openai_details: DEBUG_ERRORS ? e?.details : undefined,
+    });
   }
 });
 
