@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Test InfinityBraids AI</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; background:#0f0f12; color:#fff; padding:24px; }
+    .box { max-width:820px; margin:auto; background:#1b1b22; padding:20px; border-radius:12px; }
+    input, button { padding:10px; font-size:16px; }
+    button { cursor:pointer; }
+    pre { background:#0b0b10; padding:12px; border-radius:8px; white-space:pre-wrap; overflow:auto; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .full { width:100%; }
+    .hint { opacity:0.8; font-size:14px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Test analizy zdjęcia (InfinityBraids AI)</h2>
+
+    <div class="row">
+      <input type="file" id="file" accept="image/*" />
+      <button onclick="send()">Wyślij zdjęcie</button>
+    </div>
+
+    <div style="margin-top:12px;">
+      <input class="full" type="text" id="clientText"
+             placeholder="Wpisz wiadomość klienta (np. Hi / Cześć / Hola) — bot odpowie w tym języku"
+      />
+      <div class="hint">Zostaw puste → domyślnie EN.</div>
+    </div>
+
+    <h3 style="margin-top:18px;">Odpowiedź:</h3>
+    <pre id="out">—</pre>
+  </div>
+
+  <script>
+    async function send() {
+      const fileInput = document.getElementById("file");
+      const out = document.getElementById("out");
+      const clientText = document.getElementById("clientText").value || "";
+
+      if (!fileInput.files.length) {
+        alert("Wybierz zdjęcie");
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+
+      reader.onload = async () => {
+        try {
+          out.textContent = "Wysyłam zdjęcie…";
+          const base64 = reader.result;
+
+          const resp = await fetch("http://localhost:3000/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              image_base64: base64,
+              client_text: clientText
+              // product_type: "braid"  // opcjonalnie: jeśli chcesz filtrować po typie
+            })
+          });
+
+          const data = await resp.json();
+          out.textContent = JSON.stringify(data, null, 2);
+        } catch (e) {
+          out.textContent = "Błąd: " + e.message;
+        }
+      };
+
+      reader.readAsDataURL(file);
+    }
+  </script>
+</body>
+</html>

@@ -244,7 +244,7 @@ function buildHumanMessage({ lang, tone, hair_hex, recommendations }) {
     },
     de: {
       greet: "Hallo! 😊 Danke für das Foto — ich helfe dir gern.",
-      intro: `So wie es aussieht, ist dein Haarton **${tLabel}** (ca. ${hair_hex}).`,
+      intro: `So wie es aussieht, ist dein Haorton **${tLabel}** (ca. ${hair_hex}).`,
       listTitle: "Die besten Matches von Infinity Braids:",
       tip: "Tipp: Tageslicht + kein Filter = genauester Match.",
       close: "Wenn du willst: sag mir, ob du lieber wärmer oder kühler möchtest — ich passe die Auswahl an 💛",
@@ -398,6 +398,9 @@ function extractImageDataUrl(body) {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
+app.get("/", (req, res) => {
+  res.status(200).send("OK - infinitybraids-api is running");
+});
 
 app.get("/health", (req, res) => {
   res.json({
@@ -513,5 +516,5 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`API działa na http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
 });

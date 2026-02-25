@@ -1,7 +1,7 @@
 {
   "name": "infinitybraids-api",
   "version": "1.0.0",
-  "description": "InfinityBraids AI API",
+  "description": "InfinityBraids AI color matching API",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -11,9 +11,9 @@
     "node": ">=18"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-fetch": "^2.6.12"
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "node-fetch": "^3.3.2"
   }
 }
