@@ -187,5 +187,10 @@ app.post("/webhook", heavyLimiter, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Server error", details: String(e) });
   }
 });
-
+app.get("/version", (req, res) => {
+  res.json({
+    version: "v2-image-url",
+    time: new Date().toISOString()
+  });
+});
 app.listen(PORT, () => console.log(`API listening on port ${PORT}`));
